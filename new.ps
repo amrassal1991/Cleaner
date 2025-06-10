@@ -1,0 +1,265 @@
+#Requires -RunAsAdministrator
+
+param(
+    [switch]$Headless,
+    [switch]$Automated,
+    [ValidateRange(1,7)][int]$Phase
+)
+
+#region --- Configuration and Setup ---
+
+# ANSI color codes
+$COLOR_RED = "`e[31m"
+$COLOR_GREEN = "`e[32m"
+$COLOR_YELLOW = "`e[33m"
+$COLOR_CYAN = "`e[36m"
+$COLOR_RESET = "`e[0m"
+
+# Initialize variables
+$scriptName = $MyInvocation.MyCommand.Name
+$config = $null # Initialize to null
+$baseDir = $null
+$logDir = $null
+$reportDir = $null
+$backupDir = $null
+$stateFile = $null
+$lockFile = "$env:TEMP\$($scriptName).lock" # Use script name in lock file
+$completedPhases = @()
+$phaseReports = @{}
+$startTime = Get-Date
+$headless = $Headless.IsPresent
+$automated = $Automated.IsPresent
+$selectedPhase = if ($PSBoundParameters.ContainsKey('Phase')) { "Phase$Phase" } else { $null } # Check if Phase was explicitly passed
+
+#endregion
+
+#region --- Helper Functions ---
+
+# Log function
+function Write-Log {
+    param(
+        [Parameter(Mandatory=$true)][string]$Message,
+        [string]$Level = "INFO",
+        [string]$Phase = "Main"
+    )
+    $script:logDir = $script:logDir -replace '\\$', '' # Ensure no trailing slash
+    $logFile = "$script:logDir\$Phase.log"
+    $logMessage = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [$Level]: $Message"
+    
+    try {
+        if (!(Test-Path $script:logDir)) {
+            New-Item -ItemType Directory -Path $script:logDir -ErrorAction Stop | Out-Null
+        }
+        Add-Content -Path $logFile -Value $logMessage -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-Host "$COLOR_RED[ERROR - Logging]: Failed to write to log file '$logFile'. Error: $($_.Exception.Message)$COLOR_RESET"
+    }
+}
+
+# Check for Administrator privileges
+function Test-IsAdministrator {
+    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# Ollama communication function
+function Invoke-Ollama {
+    param(
+        [Parameter(Mandatory=$true)][string]$Prompt
+    )
+    
+    Write-Log "Attempting to communicate with Ollama for prompt: '$Prompt'" -Phase "Ollama"
+    try {
+        # Check if ollama command is available
+        if (-not (Get-Command ollama -ErrorAction SilentlyContinue)) {
+            throw "Ollama command not found. Please ensure Ollama is installed and added to your system's PATH."
+        }
+        
+        # Execute ollama command
+        # Capture both stdout and stderr by redirecting stderr (2) to stdout (1)
+        # and then capturing all output.
+        $process = Start-Process -FilePath "ollama" -ArgumentList "run llama3 `"$Prompt`"" -NoNewWindow -PassThru -RedirectStandardOutput ([string]::Empty) -RedirectStandardError ([string]::Empty)
+        $process.WaitForExit()
+
+        # Read the output from the streams (this might be slightly tricky with RedirectStandardOutput/Error to files if not careful)
+        # For simplicity, if we capture directly, we might need a different approach for true process control
+        # Let's revert to the simpler `ollama run ... 2>&1` if that works better for direct output capture,
+        # otherwise for full control, we need to redirect to files and read them.
+        # For typical `ollama run`, direct capture usually works.
+        $response = (Invoke-Expression "ollama run llama3 `"$Prompt`"") 2>&1
+
+        # Check if Ollama returned an error or an actual response
+        if ($LASTEXITCODE -ne 0) {
+            Write-Log "Ollama command exited with code $LASTEXITCODE. Output: $response" -Level "ERROR" -Phase "Ollama"
+            throw "Ollama command failed. Output: $response"
+        }
+        
+        Write-Log "Ollama response: $response" -Phase "Ollama"
+        return $response
+    }
+    catch {
+        Write-Log "Error communicating with Ollama: $($_.Exception.Message)" -Level "ERROR" -Phase "Ollama"
+        Write-Host "$COLOR_RED[ERROR]: Ollama communication failed. $($_.Exception.Message)$COLOR_RESET"
+        return $null # Return null on failure
+    }
+}
+
+#endregion
+
+#region --- Script Main Logic ---
+
+# This code will execute at the beginning of the script execution
+Write-Host "$COLOR_CYANStarting $scriptName script...$COLOR_RESET"
+Write-Log "Script started."
+
+# Verify Administrator privileges
+if (-not (Test-IsAdministrator)) {
+    Write-Log "Script requires Administrator privileges. Exiting." -Level "FATAL"
+    Write-Host "$COLOR_RED[FATAL]: This script must be run as Administrator. Please right-click and 'Run as administrator'.$COLOR_RESET"
+    exit 1
+}
+
+# Lock file mechanism
+try {
+    if (Test-Path $lockFile) {
+        $lockFileContent = Get-Content $lockFile -ErrorAction SilentlyContinue
+        if ($lockFileContent) {
+            Write-Log "Lock file '$lockFile' found. Another instance might be running or previous run crashed. Content: $lockFileContent" -Level "WARNING"
+            Write-Host "$COLOR_YELLOW[WARNING]: Lock file found. Another instance may be running or a previous run crashed.$COLOR_RESET"
+            # You might add logic here to ask the user if they want to proceed or to check for an active process
+        } else {
+            Write-Log "Empty lock file '$lockFile' found. Attempting to create new one." -Level "INFO"
+        }
+    }
+    
+    # Create lock file with current process ID and timestamp
+    "$(Get-Process -Id $PID). $(Get-Date)" | Set-Content $lockFile -ErrorAction Stop
+    Write-Log "Lock file '$lockFile' created."
+
+}
+catch {
+    Write-Log "Failed to create lock file '$lockFile'. $($_.Exception.Message)" -Level "FATAL"
+    Write-Host "$COLOR_RED[FATAL]: Could not create lock file '$lockFile'. Another instance might be running or permissions issue. $($_.Exception.Message)$COLOR_RESET"
+    exit 1
+}
+
+# Load configuration
+try {
+    $configPath = Join-Path (Split-Path $MyInvocation.MyCommand.Definition) "Config.json"
+    if (-not (Test-Path $configPath)) {
+        throw "Config.json not found at '$configPath'. Please ensure it exists."
+    }
+    $config = Get-Content $configPath | ConvertFrom-Json -ErrorAction Stop
+    Write-Log "Config.json loaded successfully."
+
+    # Validate essential config properties
+    if (-not $config.BaseDir) {
+        throw "BaseDir is not defined in Config.json."
+    }
+
+    # Resolve BaseDir
+    try {
+        $baseDir = Invoke-Expression $config.BaseDir
+        if (-not ($baseDir -is [string] -and $baseDir -notmatch '^\s*$')) {
+            throw "Resolved BaseDir is empty or not a valid string."
+        }
+        Write-Log "Base directory resolved to: '$baseDir'"
+    }
+    catch {
+        throw "Failed to resolve BaseDir from config: $($_.Exception.Message)"
+    }
+
+    # Set up directories, creating them if they don't exist
+    $logDir = "$baseDir\Logs"
+    $reportDir = "$baseDir\Reports"
+    $backupDir = "$baseDir\Backups"
+    $stateFile = "$baseDir\State.json"
+
+    $dirsToCreate = @($logDir, $reportDir, $backupDir)
+    foreach ($dir in $dirsToCreate) {
+        try {
+            if (!(Test-Path $dir)) {
+                New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null
+                Write-Log "Created directory: '$dir'"
+            } else {
+                Write-Log "Directory already exists: '$dir'" -Level "DEBUG"
+            }
+        }
+        catch {
+            throw "Failed to create directory '$dir': $($_.Exception.Message)"
+        }
+    }
+}
+catch {
+    Write-Log "Error loading configuration or setting up directories: $($_.Exception.Message)" -Level "FATAL"
+    Write-Host "$COLOR_RED[FATAL]: Configuration or directory setup failed. $($_.Exception.Message)$COLOR_RESET"
+    # Attempt to clean up lock file before exiting on FATAL error
+    if (Test-Path $lockFile) { Remove-Item $lockFile -ErrorAction SilentlyContinue }
+    exit 1
+}
+
+Write-Host "$COLOR_GREENInitialization complete.$COLOR_RESET"
+
+
+# This is the main body of your script that will execute
+Write-Log "Starting main processing phase."
+# Example usage of Invoke-Ollama
+$ollamaPrompt = "Summarize the key benefits of using PowerShell for automation."
+$ollamaSummary = Invoke-Ollama -Prompt $ollamaPrompt
+
+if ($ollamaSummary) {
+    Write-Host "$COLOR_CYANOllama Summary:$COLOR_RESET`n$ollamaSummary"
+    Write-Log "Successfully got Ollama summary."
+} else {
+    Write-Host "$COLOR_REDFailed to get Ollama summary.$COLOR_RESET"
+    Write-Log "Failed to get Ollama summary." -Level "ERROR"
+}
+
+# Your existing script logic for phases would go here.
+# This is where you would iterate through your phases (Phase1, Phase2, etc.)
+# and call corresponding functions based on $selectedPhase or $automated.
+
+# Example placeholder for phase execution
+if ($selectedPhase) {
+    Write-Host "Executing only $selectedPhase..."
+    Write-Log "Executing only $selectedPhase..."
+    # Example: if ($selectedPhase -eq "Phase1") { Invoke-Phase1 }
+} elseif ($automated) {
+    Write-Host "Running in automated mode, executing all phases..."
+    Write-Log "Running in automated mode, executing all phases..."
+    # Example: Invoke-Phase1; Invoke-Phase2; ...
+} else {
+    Write-Host "Running interactively. No specific phase selected or automated mode."
+    Write-Log "Running interactively. No specific phase selected or automated mode."
+}
+
+# This is where you would process $completedPhases and $phaseReports
+# For example:
+# $completedPhases += "PhaseX"
+# $phaseReports["PhaseX"] = "Report content for PhaseX"
+
+Write-Log "Main processing phase completed."
+
+
+# This code will execute at the very end of the script, regardless of errors
+# (though a fatal exit will prevent it). It's good for final cleanup.
+$endTime = Get-Date
+$duration = New-TimeSpan -Start $startTime -End $endTime
+Write-Log "Script finished. Total duration: $($duration.TotalSeconds) seconds."
+
+Write-Host "$COLOR_GREENScript execution finished.$COLOR_RESET"
+Write-Host "$COLOR_GREENTotal duration: $($duration.ToString('g'))$COLOR_RESET" # 'g' for general short format
+
+# Clean up lock file
+try {
+    if (Test-Path $lockFile) {
+        Remove-Item $lockFile -ErrorAction Stop
+        Write-Log "Lock file '$lockFile' removed."
+    }
+}
+catch {
+    Write-Log "Failed to remove lock file '$lockFile'. $($_.Exception.Message)" -Level "ERROR"
+    Write-Host "$COLOR_RED[ERROR]: Failed to remove lock file '$lockFile'. Please remove it manually if necessary.$COLOR_RESET"
+}
+
+#endregion
