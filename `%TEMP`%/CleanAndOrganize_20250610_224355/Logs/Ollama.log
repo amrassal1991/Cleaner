@@ -1,0 +1,3 @@
+2025-06-10 22:43:55 [INFO]: Attempting to communicate with Ollama for prompt: 'Summarize the key benefits of using PowerShell for automation.'
+2025-06-10 22:43:57 [ERROR]: Ollama command exited with code 1. Output: Error: unknown command "run llama3 Summarize" for "ollama"
+2025-06-10 22:43:57 [ERROR]: Error communicating with Ollama: Ollama command failed. Output: Error: unknown command "run llama3 Summarize" for "ollama"

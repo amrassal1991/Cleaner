@@ -1,0 +1,18 @@
+{
+  "BaseDir": "$env:TEMP\\CleanAndOrganize_$((Get-Date -Format 'yyyyMMdd_HHmmss'))",
+  "EsPath": "es",
+  "UserProfile": "$env:USERPROFILE",
+  "Paths": [
+    "$env:USERPROFILE\\AppData\\Roaming",
+    "$env:USERPROFILE\\AppData\\Local",
+    "$env:USERPROFILE\\AppData\\LocalLow",
+    "$env:ProgramFiles",
+    "${env:ProgramFiles(x86)}"
+  ],
+  "DestFolders": {
+    ".doc,.docx,.pdf,.txt": "$env:USERPROFILE\\Documents",
+    ".jpg,.jpeg,.png,.gif": "$env:USERPROFILE\\Pictures",
+    ".mp4,.avi,.mkv": "$env:USERPROFILE\\Videos",
+    ".mp3,.wav,.flac": "$env:USERPROFILE\\Music"
+  }
+}

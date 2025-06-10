@@ -1,0 +1,9 @@
+2025-06-10 22:43:55 [INFO]: Created directory: '`%TEMP`%\CleanAndOrganize_20250610_224355\Logs'
+2025-06-10 22:43:55 [INFO]: Created directory: '`%TEMP`%\CleanAndOrganize_20250610_224355\Reports'
+2025-06-10 22:43:55 [INFO]: Created directory: '`%TEMP`%\CleanAndOrganize_20250610_224355\Backups'
+2025-06-10 22:43:55 [INFO]: Starting main processing phase.
+2025-06-10 22:43:57 [ERROR]: Failed to get Ollama summary.
+2025-06-10 22:43:57 [INFO]: Running interactively. No specific phase selected or automated mode.
+2025-06-10 22:43:57 [INFO]: Main processing phase completed.
+2025-06-10 22:43:57 [INFO]: Script finished. Total duration: 2.0528238 seconds.
+2025-06-10 22:43:57 [INFO]: Lock file 'C:\Users\amras\AppData\Local\Temp\CleanAndOrganize.ps1.lock' removed.
